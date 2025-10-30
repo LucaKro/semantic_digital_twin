@@ -13,6 +13,7 @@ from .connections import (
     RevoluteConnection,
     Connection6DoF,
     OmniDrive,
+    TendonConnection,
 )
 from .geometry import transformation_from_json, transformation_to_json
 from .world_entity import Connection
@@ -366,6 +367,71 @@ class OmniDriveFactory(ConnectionFactory[OmniDrive]):
             y_velocity_name=PrefixedName.from_json(data["y_velocity"]),
             translation_velocity_limits=data["translation_velocity_limits"],
             rotation_velocity_limits=data["rotation_velocity_limits"],
+            parent_T_connection_expression=transformation_from_json(
+                data["parent_T_connection_expression"]
+            ),
+        )
+
+
+@dataclass
+class TendonConnectionFactory(ConnectionFactory[TendonConnection]):
+    tendon_1_name: PrefixedName
+    tendon_2_name: PrefixedName
+    axis: cas.Vector3
+    pulley_radius: float = field(default=0.05)
+
+    @classmethod
+    def _from_connection(cls, connection: TendonConnection) -> Self:
+        return cls(
+            name=connection.name,
+            parent_name=connection.parent.name,
+            child_name=connection.child.name,
+            tendon_1_name=connection.tendon_1.name,
+            tendon_2_name=connection.tendon_2.name,
+            axis=connection.axis,
+            pulley_radius=connection.pulley_radius,
+            parent_T_connection_expression=connection.parent_T_connection_expression,
+        )
+
+    def create(self, world: World) -> None:
+        parent = world.get_kinematic_structure_entity_by_name(self.parent_name)
+        child = world.get_kinematic_structure_entity_by_name(self.child_name)
+        self.parent_T_connection_expression.reference_frame = parent
+        self.axis.reference_frame = parent
+        connection = self.original_class()(
+            parent=parent,
+            child=child,
+            name=self.name,
+            tendon_1_name=world.get_degree_of_freedom_by_name(self.tendon_1_name).name,
+            tendon_2_name=world.get_degree_of_freedom_by_name(self.tendon_2_name).name,
+            axis=self.axis,
+            pulley_radius=self.pulley_radius,
+            parent_T_connection_expression=self.parent_T_connection_expression,
+            _world=world,
+        )
+        world.add_connection(connection)
+        connection.parent_T_connection_expression = self.parent_T_connection_expression
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            **super().to_json(),
+            "tendon_1": self.tendon_1_name.to_json(),
+            "tendon_2": self.tendon_2_name.to_json(),
+            "axis": [float(self.axis.x.to_np()), float(self.axis.y.to_np()), float(self.axis.z.to_np())],
+            "pulley_radius": self.pulley_radius,
+        }
+
+    @classmethod
+    def _from_json(cls, data: Dict[str, Any]) -> Self:
+        axis_data = data["axis"]
+        return cls(
+            name=PrefixedName.from_json(data["name"]),
+            parent_name=PrefixedName.from_json(data["parent_name"]),
+            child_name=PrefixedName.from_json(data["child_name"]),
+            tendon_1_name=PrefixedName.from_json(data["tendon_1"]),
+            tendon_2_name=PrefixedName.from_json(data["tendon_2"]),
+            axis=cas.Vector3.from_iterable(axis_data),
+            pulley_radius=data["pulley_radius"],
             parent_T_connection_expression=transformation_from_json(
                 data["parent_T_connection_expression"]
             ),

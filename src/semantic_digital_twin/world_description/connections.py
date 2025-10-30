@@ -555,3 +555,152 @@ class OmniDrive(ActiveConnection, PassiveConnection, HasUpdateState):
         self.x_vel.has_hardware_interface = value
         self.y_vel.has_hardware_interface = value
         self.yaw.has_hardware_interface = value
+
+
+@dataclass
+class TendonConnection(ActiveConnection):
+    """
+    A tendon-driven connection where joint motion is controlled by antagonistic tendons.
+    
+    The joint angle is computed from tendon displacements using the routing geometry.
+    For an antagonistic pair around a revolute joint:
+    - tendon_1 pulls to increase joint angle (agonist)
+    - tendon_2 pulls to decrease joint angle (antagonist)
+    
+    The relationship is: theta = (tendon_1 - tendon_2) / pulley_radius
+    where tendon positions represent displacement from neutral position.
+    """
+    
+    axis: cas.Vector3 = field(kw_only=True)
+    """
+    Axis of rotation for the joint (unit vector in parent frame).
+    """
+    
+    pulley_radius: float = field(default=0.05, kw_only=True)
+    """
+    Effective radius of the pulley/moment arm at the joint (in meters).
+    Relates tendon displacement to joint angle: theta = delta_length / radius
+    """
+    
+    tendon_1_name: PrefixedName = field(default=None)
+    tendon_2_name: PrefixedName = field(default=None)
+    """
+    Names of the two antagonistic tendon DOFs.
+    """
+    
+    tendon_1: DegreeOfFreedom = field(default=None, init=False)
+    tendon_2: DegreeOfFreedom = field(default=None, init=False)
+    """
+    The two tendon degrees of freedom (agonist and antagonist).
+    Positive values represent tendon shortening (pulling).
+    """
+    
+    def add_to_world(self, world: World):
+        super().add_to_world(world)
+        self._post_init_world_part()
+        
+        # Compute joint angle from tendon positions
+        # theta = (tendon_1_displacement - tendon_2_displacement) / pulley_radius
+        # Positive tendon_1 increases angle, positive tendon_2 decreases angle
+        joint_angle = (
+            self.tendon_1.symbols.position - self.tendon_2.symbols.position
+        ) / self.pulley_radius
+        
+        # Create the transformation from tendon-derived angle
+        self.connection_T_child_expression = (
+            cas.TransformationMatrix.from_xyz_axis_angle(
+                axis=self.axis,
+                angle=joint_angle,
+                child_frame=self.child,
+            )
+        )
+    
+    def _post_init_with_world(self):
+        """Create tendon DOFs if they don't exist."""
+        if self.tendon_1_name is None or self.tendon_2_name is None:
+            # Create new tendon DOFs
+            # Define tendon displacement limits (in meters)
+            # Typical range: 0 to 0.1m of displacement
+            lower_limits = DerivativeMap()
+            lower_limits.position = 0.0  # Tendons can't push
+            lower_limits.velocity = -0.05  # Max relaxation rate (m/s)
+            
+            upper_limits = DerivativeMap()
+            upper_limits.position = 0.1  # Max tendon displacement (m)
+            upper_limits.velocity = 0.05  # Max contraction rate (m/s)
+            
+            with self._world.modify_world():
+                self.tendon_1 = DegreeOfFreedom(
+                    name=PrefixedName("tendon_1", self.name.name),
+                    lower_limits=lower_limits,
+                    upper_limits=upper_limits,
+                )
+                self._world.add_degree_of_freedom(self.tendon_1)
+                self.tendon_1_name = self.tendon_1.name
+                
+                self.tendon_2 = DegreeOfFreedom(
+                    name=PrefixedName("tendon_2", self.name.name),
+                    lower_limits=lower_limits,
+                    upper_limits=upper_limits,
+                )
+                self._world.add_degree_of_freedom(self.tendon_2)
+                self.tendon_2_name = self.tendon_2.name
+        else:
+            # Use existing DOFs
+            self.tendon_1 = self._world.get_degree_of_freedom_by_name(self.tendon_1_name)
+            self.tendon_2 = self._world.get_degree_of_freedom_by_name(self.tendon_2_name)
+    
+    def _post_init_without_world(self):
+        """Validate that tendon DOFs are provided when no world is available."""
+        if self.tendon_1_name is None or self.tendon_2_name is None:
+            raise ValueError(
+                "TendonConnection cannot be created without a world "
+                "if tendon DOFs are not provided."
+            )
+    
+    @property
+    def active_dofs(self) -> List[DegreeOfFreedom]:
+        """Return the two tendon DOFs as active (controllable) DOFs."""
+        return [self.tendon_1, self.tendon_2]
+    
+    @property
+    def joint_angle(self) -> float:
+        """
+        Compute the current joint angle from tendon positions.
+        :return: Joint angle in radians.
+        """
+        tendon_1_position = self._world.state[self.tendon_1.name].position
+        tendon_2_position = self._world.state[self.tendon_2.name].position
+        return (tendon_1_position - tendon_2_position) / self.pulley_radius
+    
+    def set_joint_angle(self, angle: float, pretension: float = 0.02):
+        """
+        Set the joint to a specific angle while maintaining pretension.
+        
+        :param angle: Desired joint angle in radians
+        :param pretension: Base tendon tension (displacement) to maintain, in meters
+        """
+        # To achieve angle theta with pretension:
+        # tendon_1 = pretension + (theta * radius) / 2
+        # tendon_2 = pretension - (theta * radius) / 2
+        displacement = angle * self.pulley_radius / 2
+        
+        self._world.state[self.tendon_1.name].position = pretension + displacement
+        self._world.state[self.tendon_2.name].position = pretension - displacement
+        self._world.notify_state_change()
+    
+    @property
+    def stiffness(self) -> float:
+        """
+        Compute joint stiffness from tendon pretension.
+        Higher pretension = higher stiffness (for variable stiffness control).
+        
+        This is a simplified model. Real stiffness depends on tendon elasticity.
+        """
+        tendon_1_position = self._world.state[self.tendon_1.name].position
+        tendon_2_position = self._world.state[self.tendon_2.name].position
+        # Pretension is average of both tendon displacements
+        return (tendon_1_position + tendon_2_position) / 2
+    
+    def __hash__(self):
+        return hash((self.parent, self.child))

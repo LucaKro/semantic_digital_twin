@@ -18,7 +18,8 @@ from krrood.entity_query_language.predicate import Predicate, HasTypes, HasType,
 from krrood.entity_query_language.symbol_graph import SymbolGraph
 from krrood.ormatic.dao import AlternativeMapping
 from krrood.ormatic.ormatic import ORMatic
-from krrood.ormatic.utils import classes_of_module, recursive_subclasses
+from krrood.ormatic.utils import classes_of_module
+from krrood.utils import recursive_subclasses
 
 import semantic_digital_twin.orm.model
 import semantic_digital_twin.robots.abstract_robot
@@ -77,7 +78,7 @@ all_classes -= {
 }
 
 # build the symbol graph
-symbol_graph = SymbolGraph.build()
+symbol_graph = SymbolGraph()
 
 # collect all KRROOD classes
 all_classes |= {c.clazz for c in symbol_graph.class_diagram.wrapped_classes}
